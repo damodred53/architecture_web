@@ -143,42 +143,42 @@ public class DocsController : ControllerBase
         return Ok(new { id, file = file.FileName });
     }
 
-   [HttpGet("search")]
+     [HttpGet("search")]
     public async Task<IActionResult> Search(
         [FromQuery] string q,
         [FromQuery] int size = 10,
         [FromQuery] int from = 0,
+        [FromQuery] bool includeOccurrences = true,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(q)) return BadRequest("Paramètre 'q' requis.");
         size = size is > 0 and <= 100 ? size : 10;
         from = Math.Max(0, from);
 
+    
         var resp = await _es.SearchAsync<dynamic>(s => s
             .Index(IndexName)
             .From(from)
             .Size(size)
-            .TrackTotalHits(true) 
+            .TrackTotalHits(true)
             .Query(qry => qry
                 .Bool(b => b
                     .Should(
-                      
                         sh => sh.SimpleQueryString(sqs => sqs
                             .Fields(f => f
                                 .Field("attachment.content")
-                                .Field("fileName")        
+                                .Field("fileName")
                             )
                             .Query(q)
                             .DefaultOperator(Operator.And)
-                            .AnalyzeWildcard(true)
+                            .AnalyzeWildcard(false)
                         ),
-                        // + tolérance faute & proximité
                         sh => sh.Match(m => m
                             .Field("attachment.content")
                             .Query(q)
                             .Operator(Operator.And)
-                            .Fuzziness(Fuzziness.Auto)
-                            .MinimumShouldMatch("75%")
+                          
+                            .MinimumShouldMatch("100%")
                         )
                     )
                     .MinimumShouldMatch(1)
@@ -189,49 +189,133 @@ public class DocsController : ControllerBase
                 .RequireFieldMatch(false)
                 .Fields(f => f
                     .Field("attachment.content")
+                    .NumberOfFragments(20000)
                     .FragmentSize(50)
-                    .NumberOfFragments(200000)
                 )
-            )
-
-        , ct);
+            ),
+            ct
+        );
 
         if (!resp.IsValid)
             return Problem($"Recherche échouée: {resp.ServerError?.Error?.Reason ?? resp.OriginalException?.Message}");
 
-        var results = resp.Hits.Select(h =>
+      
+        string[] queryTokens = Array.Empty<string>();
+        if (includeOccurrences)
+        {
+            var analyze = await _es.Indices.AnalyzeAsync(a => a
+                .Index(IndexName)
+                .Analyzer("fr_text")
+                .Text(q),
+                ct
+            );
+
+            queryTokens = analyze.Tokens?
+                .Select(t => t.Token)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray() ?? Array.Empty<string>();
+        }
+        var queryTokenSet = new HashSet<string>(queryTokens, StringComparer.Ordinal);
+
+    
+        var enriched = new List<object>(resp.Hits.Count);
+
+        foreach (var h in resp.Hits)
         {
             string fileName = string.Empty;
-
             if (h.Source is IDictionary<string, object> dict &&
-                dict.TryGetValue("fileName", out var v) &&
-                v is not null)
+                dict.TryGetValue("fileName", out var v) && v is not null)
             {
                 fileName = v.ToString();
             }
 
             var snippets = Array.Empty<string>();
-            if (h.Highlight != null && h.Highlight.TryGetValue("attachment.content", out var hs))
-                snippets = (string[])hs;
+            if (h.Highlight != null &&
+                h.Highlight.TryGetValue("attachment.content", out var hs) &&
+                hs != null)
+            {
+                // hs est IReadOnlyCollection<string>
+                snippets = hs.ToArray();
+            }
 
-            return new
+            int totalOccurrences = 0;
+            Dictionary<string, int>? countsByTerm = null;
+            List<object>? occurrences = null;
+
+            if (includeOccurrences && queryTokens.Length > 0)
+            {
+                // ✅ Pas de lambda .Field(...): on passe le champ directement en string
+                var tv = await _es.TermVectorsAsync<object>(t => t
+                    .Index(IndexName)
+                    .Id(h.Id)
+                    .Fields("attachment.content")
+                    .Offsets(true)
+                    .Positions(true)
+                    .Payloads(false)
+                    .TermStatistics(false)
+                    .FieldStatistics(false),
+                    ct
+                );
+
+                countsByTerm = new Dictionary<string, int>(StringComparer.Ordinal);
+                occurrences = new List<object>();
+
+                if (tv?.TermVectors != null &&
+                    tv.TermVectors.TryGetValue("attachment.content", out var tvField) &&
+                    tvField.Terms != null)
+                {
+                    foreach (var kv in tvField.Terms)
+                    {
+                        string term = kv.Key;
+
+                        // On garde seulement les tokens issus de la requête
+                        if (!queryTokenSet.Contains(term)) continue;
+
+                        var info = kv.Value;
+                        countsByTerm[term] = info.TermFrequency;
+                        totalOccurrences += info.TermFrequency;
+
+                        if (info.Tokens != null)
+                        {
+                            foreach (var tok in info.Tokens)
+                            {
+                                occurrences.Add(new
+                                {
+                                    term,
+                                    position = tok.Position,
+                                    start = tok.StartOffset,
+                                    end = tok.EndOffset
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            enriched.Add(new
             {
                 id = h.Id,
                 score = h.Score,
                 fileName,
-                snippets
-            };
-        });
-
+                snippets,
+                totalOccurrences,
+                countsByTerm,
+                occurrences
+            });
+        }
 
         return Ok(new
         {
-            total = resp.Total,         
+            total = resp.Total,
             tookMs = resp.Took,
             from,
             size,
-            results
+            analyzedQueryTokens = queryTokens,
+            results = enriched
         });
     }
+
+
 
 }
