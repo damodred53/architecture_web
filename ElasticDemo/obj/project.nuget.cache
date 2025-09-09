@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "dgSpecHash": "fHUFN1y0z3A=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\flore\\Desktop\\autre test\\architecture_web\\ElasticDemo\\ElasticDemo.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\flore\\.nuget\\packages\\elastic.clients.elasticsearch\\8.15.0\\elastic.clients.elasticsearch.8.15.0.nupkg.sha512",
+    "C:\\Users\\flore\\.nuget\\packages\\elastic.transport\\0.4.22\\elastic.transport.0.4.22.nupkg.sha512",
+    "C:\\Users\\flore\\.nuget\\packages\\uglytoad.pdfpig\\1.7.0-custom-5\\uglytoad.pdfpig.1.7.0-custom-5.nupkg.sha512",
+    "C:\\Users\\flore\\.nuget\\packages\\uglytoad.pdfpig.core\\1.7.0-custom-5\\uglytoad.pdfpig.core.1.7.0-custom-5.nupkg.sha512",
+    "C:\\Users\\flore\\.nuget\\packages\\uglytoad.pdfpig.fonts\\1.7.0-custom-5\\uglytoad.pdfpig.fonts.1.7.0-custom-5.nupkg.sha512",
+    "C:\\Users\\flore\\.nuget\\packages\\uglytoad.pdfpig.tokenization\\1.7.0-custom-5\\uglytoad.pdfpig.tokenization.1.7.0-custom-5.nupkg.sha512",
+    "C:\\Users\\flore\\.nuget\\packages\\uglytoad.pdfpig.tokens\\1.7.0-custom-5\\uglytoad.pdfpig.tokens.1.7.0-custom-5.nupkg.sha512"
+  ],
+  "logs": []
+}
