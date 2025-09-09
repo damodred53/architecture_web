@@ -16,7 +16,7 @@ public class DocsController : ControllerBase
 
 
 
-    [HttpPost]
+    [HttpPost("/init")]
     public async Task CreatePipeline()
     {
         var body = @"
