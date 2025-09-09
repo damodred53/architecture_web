@@ -16,27 +16,102 @@ public class DocsController : ControllerBase
 
 
 
-    [HttpPost("/init")]
-    public async Task CreatePipeline()
+    [HttpPost("init")]
+    public async Task<IActionResult> InitAll(CancellationToken ct = default)
     {
-        var body = @"
-   {
-       ""description"": ""Extract text from PDF"",
-       ""processors"": [
-         { ""attachment"": { ""field"": ""data"", ""indexed_chars"": -1 } }
-       ]
-   }
-   ";
+        // 1) Créer l’index s’il n’existe pas
+        var exists = await _es.Indices.ExistsAsync(IndexName, i => i, ct);
+        bool indexCreated = false;
 
-        var putPipelineResponse = await _es.LowLevel.Ingest.PutPipelineAsync<StringResponse>( PipelineName, body);
-        if (!putPipelineResponse.Success)
+        if (!exists.Exists)
         {
-            var error = putPipelineResponse.OriginalException?.Message;
-            throw new Exception(error);
-        }
-        
+            var indexCreateBody = @"
+            {
+              ""settings"": {
+                ""analysis"": {
+                  ""analyzer"": {
+                    ""fr_text"": { ""type"": ""french"" }
+                  }
+                }
+              },
+              ""mappings"": {
+                ""properties"": {
+                  ""fileName"": {
+                    ""type"": ""text"",
+                    ""fields"": { ""keyword"": { ""type"": ""keyword"", ""ignore_above"": 256 } }
+                  },
+                  ""uploadedAt"": { ""type"": ""date"" },
+                  ""attachment"": {
+                    ""properties"": {
+                      ""content"": {
+                        ""type"": ""text"",
+                        ""analyzer"": ""fr_text"",
+                        ""term_vector"": ""with_positions_offsets"",
+                        ""index_prefixes"": { ""min_chars"": 2, ""max_chars"": 10 }
+                      }
+                    }
+                  }
+                }
+              }
+            }";
 
+            var indexCreateResp = await _es.LowLevel.Indices.CreateAsync<StringResponse>(
+                IndexName,
+                PostData.String(indexCreateBody),
+                requestParameters: null,
+                ctx: ct
+            );
+
+            if (!indexCreateResp.Success)
+            {
+                var err = indexCreateResp.OriginalException?.Message ?? indexCreateResp.Body;
+                return Problem($"Création de l'index échouée: {err}");
+            }
+
+            indexCreated = true;
+        }
+
+        // 2) (Ré)créer / mettre à jour le pipeline d’ingest
+        var pipelineBody = @"
+        {
+          ""description"": ""Extract text from PDF"",
+          ""processors"": [
+            {
+              ""attachment"": {
+                ""field"": ""data"",
+                ""target_field"": ""attachment"",
+                ""indexed_chars"": -1
+              }
+            },
+            { ""remove"": { ""field"": ""data"", ""ignore_missing"": true } }
+          ],
+          ""on_failure"": [
+            { ""set"": { ""field"": ""ingest_error"", ""value"": ""{{ _ingest.on_failure_message }}"" } }
+          ]
+        }";
+
+        var pipelineResp = await _es.LowLevel.Ingest.PutPipelineAsync<StringResponse>(
+            PipelineName,
+            PostData.String(pipelineBody),
+            requestParameters: null,
+            ctx: ct
+        );
+
+        if (!pipelineResp.Success)
+        {
+            var err = pipelineResp.OriginalException?.Message ?? pipelineResp.Body;
+            return Problem($"Création du pipeline échouée: {err}");
+        }
+
+        return Ok(new
+        {
+            index = IndexName,
+            indexStatus = indexCreated ? "created" : "already_exists",
+            pipeline = PipelineName,
+            pipelineStatus = "upserted"
+        });
     }
+
 
     [HttpPost("upload")]
     public async Task<IActionResult> Upload(IFormFile file, CancellationToken ct)
@@ -114,8 +189,8 @@ public class DocsController : ControllerBase
                 .RequireFieldMatch(false)
                 .Fields(f => f
                     .Field("attachment.content")
-                    .FragmentSize(180)
-                    .NumberOfFragments(3)
+                    .FragmentSize(50)
+                    .NumberOfFragments(200000)
                 )
             )
 
