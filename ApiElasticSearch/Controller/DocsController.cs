@@ -83,7 +83,7 @@ public class DocsController : ControllerBase
             .Index(IndexName)
             .From(from)
             .Size(size)
-            .TrackTotalHits(true) // total exact
+            .TrackTotalHits(true) 
             .Query(qry => qry
                 .Bool(b => b
                     .Should(
