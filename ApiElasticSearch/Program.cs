@@ -8,6 +8,15 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddControllers();
 
+// 🔧 (facultatif) appsettings.json → "Redis:Configuration": "localhost:6379"
+var redisConn = builder.Configuration.GetValue<string>("Redis:Configuration");
+
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = redisConn;    
+    options.InstanceName = "docsapi:"; // préfixe des clés
+});
+
 var esSettings = new ConnectionSettings(new Uri("http://localhost:9200"))
     .DefaultIndex("documents");
 builder.Services.AddSingleton<IElasticClient>(new ElasticClient(esSettings));

@@ -1,5 +1,10 @@
-﻿using Elasticsearch.Net;
+﻿using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Elasticsearch.Net;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Caching.Distributed;
 using Nest;
 
 namespace ApiElasticSearch.Controller;
@@ -9,12 +14,24 @@ namespace ApiElasticSearch.Controller;
 public class DocsController : ControllerBase
 {
     private readonly IElasticClient _es;
+    private readonly IDistributedCache _cache;
+
     private const string IndexName = "documents";
     private const string PipelineName = "attachments";
 
-    public DocsController(IElasticClient es) => _es = es;
+    public DocsController(IElasticClient es, IDistributedCache cache)
+    {
+        _es = es;
+        _cache = cache;
+    }
 
-
+    // Clé stable et courte pour (q,size,from,includeOccurrences)
+    private static string CacheKey(string q, int size, int from, bool includeOccurrences)
+    {
+        using var sha = SHA256.Create();
+        var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes($"{q}|{size}|{from}|{includeOccurrences}"));
+        return "search:" + Convert.ToHexString(bytes); // ex: search:ABCDEF...
+    }
 
     [HttpPost("init")]
     public async Task<IActionResult> InitAll(CancellationToken ct = default)
@@ -112,7 +129,6 @@ public class DocsController : ControllerBase
         });
     }
 
-
     [HttpPost("upload")]
     public async Task<IActionResult> Upload(IFormFile file, CancellationToken ct)
     {
@@ -131,7 +147,7 @@ public class DocsController : ControllerBase
             Document = new
             {
                 fileName = file.FileName,
-                data = base64,          // le processor "attachment" lit ce champ
+                data = base64,          // lu par le processor "attachment"
                 uploadedAt = DateTime.UtcNow
             },
             Refresh = Refresh.True
@@ -140,10 +156,11 @@ public class DocsController : ControllerBase
         var resp = await _es.IndexAsync(indexReq, ct);
         if (!resp.IsValid) return Problem($"Indexation échouée: {resp.ServerError?.Error?.Reason ?? resp.OriginalException?.Message}");
 
+        // Invalidation fine non nécessaire : TTL court du cache suffit
         return Ok(new { id, file = file.FileName });
     }
 
-     [HttpGet("search")]
+    [HttpGet("search")]
     public async Task<IActionResult> Search(
         [FromQuery] string q,
         [FromQuery] int size = 10,
@@ -155,7 +172,20 @@ public class DocsController : ControllerBase
         size = size is > 0 and <= 100 ? size : 10;
         from = Math.Max(0, from);
 
-    
+        var sw = Stopwatch.StartNew();
+
+        // 0) Tentative cache
+        var cacheKey = CacheKey(q, size, from, includeOccurrences);
+        var cachedJson = await _cache.GetStringAsync(cacheKey, ct);
+        if (cachedJson is not null)
+        {
+            sw.Stop();
+            Response.Headers["X-Cache"] = "HIT";
+            Response.Headers["X-Duration-Ms"] = sw.ElapsedMilliseconds.ToString();
+            return Content(cachedJson, "application/json");
+        }
+
+        // 1) Requête ES
         var resp = await _es.SearchAsync<dynamic>(s => s
             .Index(IndexName)
             .From(from)
@@ -177,7 +207,6 @@ public class DocsController : ControllerBase
                             .Field("attachment.content")
                             .Query(q)
                             .Operator(Operator.And)
-                          
                             .MinimumShouldMatch("100%")
                         )
                     )
@@ -199,7 +228,7 @@ public class DocsController : ControllerBase
         if (!resp.IsValid)
             return Problem($"Recherche échouée: {resp.ServerError?.Error?.Reason ?? resp.OriginalException?.Message}");
 
-      
+        // 2) Analyse des tokens de la requête (si demandé)
         string[] queryTokens = Array.Empty<string>();
         if (includeOccurrences)
         {
@@ -218,7 +247,7 @@ public class DocsController : ControllerBase
         }
         var queryTokenSet = new HashSet<string>(queryTokens, StringComparer.Ordinal);
 
-    
+        // 3) Enrichissement (occurrences + snippets)
         var enriched = new List<object>(resp.Hits.Count);
 
         foreach (var h in resp.Hits)
@@ -227,7 +256,7 @@ public class DocsController : ControllerBase
             if (h.Source is IDictionary<string, object> dict &&
                 dict.TryGetValue("fileName", out var v) && v is not null)
             {
-                fileName = v.ToString();
+                fileName = v.ToString()!;
             }
 
             var snippets = Array.Empty<string>();
@@ -235,7 +264,6 @@ public class DocsController : ControllerBase
                 h.Highlight.TryGetValue("attachment.content", out var hs) &&
                 hs != null)
             {
-                // hs est IReadOnlyCollection<string>
                 snippets = hs.ToArray();
             }
 
@@ -245,7 +273,6 @@ public class DocsController : ControllerBase
 
             if (includeOccurrences && queryTokens.Length > 0)
             {
-                // ✅ Pas de lambda .Field(...): on passe le champ directement en string
                 var tv = await _es.TermVectorsAsync<object>(t => t
                     .Index(IndexName)
                     .Id(h.Id)
@@ -269,7 +296,6 @@ public class DocsController : ControllerBase
                     {
                         string term = kv.Key;
 
-                        // On garde seulement les tokens issus de la requête
                         if (!queryTokenSet.Contains(term)) continue;
 
                         var info = kv.Value;
@@ -305,7 +331,7 @@ public class DocsController : ControllerBase
             });
         }
 
-        return Ok(new
+        var payload = new
         {
             total = resp.Total,
             tookMs = resp.Took,
@@ -313,9 +339,23 @@ public class DocsController : ControllerBase
             size,
             analyzedQueryTokens = queryTokens,
             results = enriched
-        });
+        };
+
+        var json = JsonSerializer.Serialize(payload);
+
+        // 4) Mise en cache
+        await _cache.SetStringAsync(
+            cacheKey,
+            json,
+            new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(60)
+            },
+            ct);
+
+        sw.Stop();
+        Response.Headers["X-Cache"] = "MISS";
+        Response.Headers["X-Duration-Ms"] = sw.ElapsedMilliseconds.ToString();
+        return Content(json, "application/json");
     }
-
-
-
 }
