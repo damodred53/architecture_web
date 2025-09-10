@@ -1,3 +1,5 @@
+using ApiElasticSearch.Service;
+using ApiElasticSearch.Worker;
 using Nest;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -7,6 +9,28 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddControllers();
+builder.Services.AddSingleton<IBackgroundTaskQueue, BackgroundTaskQueue>();
+builder.Services.AddHostedService<Worker>();
+builder.Services.AddScoped<FireBaseEnr>();
+
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
+
+// 🔧 (facultatif) appsettings.json → "Redis:Configuration": "localhost:6379"
+var redisConn = builder.Configuration.GetValue<string>("Redis:Configuration");
+
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = redisConn;    
+    options.InstanceName = "docsapi:"; // préfixe des clés
+});
 
 var esSettings = new ConnectionSettings(new Uri("http://localhost:9200"))
     .DefaultIndex("documents");
@@ -23,9 +47,8 @@ var app = builder.Build();
     app.UseSwaggerUI();
 
 app.UseHttpsRedirection();
+app.UseCors();
 app.MapControllers();
-
-
 
 app.Run();
 
