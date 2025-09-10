@@ -219,7 +219,7 @@ public class DocsController : ControllerBase
                 .Fields(f => f
                     .Field("attachment.content")
                     .NumberOfFragments(20000)
-                    .FragmentSize(50)
+                    .FragmentSize(100)
                 )
             ),
             ct

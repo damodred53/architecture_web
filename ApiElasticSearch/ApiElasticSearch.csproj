@@ -25,6 +25,7 @@
 
     <ItemGroup>
       <Folder Include="pdf\" />
+      <Folder Include="Worker\" />
       <Folder Include="wwwroot\uploads\" />
     </ItemGroup>
 
