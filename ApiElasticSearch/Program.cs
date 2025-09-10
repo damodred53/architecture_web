@@ -1,3 +1,5 @@
+using ApiElasticSearch.Service;
+using ApiElasticSearch.Worker;
 using Nest;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -7,6 +9,10 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddControllers();
+builder.Services.AddSingleton<IBackgroundTaskQueue, BackgroundTaskQueue>();
+builder.Services.AddHostedService<Worker>();
+builder.Services.AddScoped<FireBaseEnr>();
+
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>

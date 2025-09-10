@@ -2,6 +2,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using ApiElasticSearch.Service;
+using ApiElasticSearch.Worker;
 using Elasticsearch.Net;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Distributed;
@@ -15,14 +17,21 @@ public class DocsController : ControllerBase
 {
     private readonly IElasticClient _es;
     private readonly IDistributedCache _cache;
+    private readonly IBackgroundTaskQueue _backgroundTaskQueue;
+    private readonly IServiceScopeFactory _scopeFactory;
+
+
 
     private const string IndexName = "documents";
     private const string PipelineName = "attachments";
 
-    public DocsController(IElasticClient es, IDistributedCache cache)
+    public DocsController(IElasticClient es, IDistributedCache cache,IBackgroundTaskQueue backgroundTaskQueue,
+        IServiceScopeFactory scopeFactory)
     {
         _es = es;
         _cache = cache;
+        _backgroundTaskQueue = backgroundTaskQueue;
+        _scopeFactory = scopeFactory;
     }
 
     // Clé stable et courte pour (q,size,from,includeOccurrences)
@@ -168,6 +177,16 @@ public class DocsController : ControllerBase
         [FromQuery] bool includeOccurrences = true,
         CancellationToken ct = default)
     {
+        
+        _backgroundTaskQueue.QueueBackgroundWorkItem(async ct =>
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var firebase = scope.ServiceProvider.GetRequiredService<FireBaseEnr>();
+
+        
+            await firebase.ExecAsync(q, ct);
+          
+        });
         if (string.IsNullOrWhiteSpace(q)) return BadRequest("Paramètre 'q' requis.");
         size = size is > 0 and <= 100 ? size : 10;
         from = Math.Max(0, from);
@@ -356,6 +375,9 @@ public class DocsController : ControllerBase
         sw.Stop();
         Response.Headers["X-Cache"] = "MISS";
         Response.Headers["X-Duration-Ms"] = sw.ElapsedMilliseconds.ToString();
+       
+     
+
         return Content(json, "application/json");
     }
 }

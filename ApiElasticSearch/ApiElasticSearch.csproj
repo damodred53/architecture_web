@@ -10,6 +10,7 @@
     <ItemGroup>
         <PackageReference Include="Elastic.Clients.Elasticsearch" Version="9.1.6" />
         <PackageReference Include="Elasticsearch.Net" Version="7.17.5" />
+        <PackageReference Include="Google.Cloud.Firestore" Version="3.10.0" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.8" />
         <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="8.0.19" />
         <PackageReference Include="NEST" Version="7.17.5" />
@@ -21,11 +22,13 @@
       <Content Include="..\.dockerignore">
         <Link>.dockerignore</Link>
       </Content>
+      <Content Update="ledico-d498c-firebase-adminsdk-fbsvc-eef0abcf49.json">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </Content>
     </ItemGroup>
 
     <ItemGroup>
       <Folder Include="pdf\" />
-      <Folder Include="Worker\" />
       <Folder Include="wwwroot\uploads\" />
     </ItemGroup>
 
