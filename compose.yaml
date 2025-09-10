@@ -1,12 +1,11 @@
-﻿version: "3.9"
-services:
+﻿services:
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
     container_name: elasticsearch
     environment:
       - discovery.type=single-node
-      - xpack.security.enabled=false    
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g      
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
     volumes:
       - es-data:/usr/share/elasticsearch/data
     ports:
@@ -26,8 +25,20 @@ services:
     networks:
       - esnet
 
+  redis:
+    image: redis:7
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes"] 
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - esnet
+
 volumes:
   es-data:
+  redis-data:
 
 networks:
   esnet:
