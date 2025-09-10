@@ -41,9 +41,8 @@ var app = builder.Build();
     app.UseSwaggerUI();
 
 app.UseHttpsRedirection();
+app.UseCors();
 app.MapControllers();
-
-
 
 app.Run();
 
