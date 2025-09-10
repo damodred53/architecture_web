@@ -349,7 +349,7 @@ public class DocsController : ControllerBase
             json,
             new DistributedCacheEntryOptions
             {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(60)
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
             },
             ct);
 
