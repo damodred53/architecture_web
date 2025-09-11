@@ -13,6 +13,8 @@ builder.Services.AddSingleton<IBackgroundTaskQueue, BackgroundTaskQueue>();
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddScoped<FireBaseEnr>();
 
+
+//test
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
