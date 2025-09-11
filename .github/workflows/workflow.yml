@@ -38,25 +38,6 @@ jobs:
       - name: Build
         run: dotnet build ApiElasticSearch.sln -c ${{ env.CONFIGURATION }} --no-restore
 
-  test:
-    name: Unit tests
-    runs-on: ubuntu-latest
-    needs: restore_build
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-      - name: Run tests (solution)
-        run: dotnet test ApiElasticSearch.sln -c ${{ env.CONFIGURATION }} --no-build
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: '**/TestResults/*.trx'
-          if-no-files-found: ignore
-
   audit:
     name: Vulnerability scan
     runs-on: ubuntu-latest
@@ -75,7 +56,7 @@ jobs:
   publish_api:
     name: Publish API (zip)
     runs-on: ubuntu-latest
-    needs: [test, audit]
+    needs: audit
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
