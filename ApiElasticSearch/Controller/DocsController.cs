@@ -6,7 +6,9 @@ using ApiElasticSearch.Service;
 using ApiElasticSearch.Worker;
 using Elasticsearch.Net;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Logging;
 using Nest;
 
 namespace ApiElasticSearch.Controller;
@@ -19,33 +21,43 @@ public class DocsController : ControllerBase
     private readonly IDistributedCache _cache;
     private readonly IBackgroundTaskQueue _backgroundTaskQueue;
     private readonly IServiceScopeFactory _scopeFactory;
-
-
+    private readonly ILogger<DocsController> _logger;
 
     private const string IndexName = "documents";
     private const string PipelineName = "attachments";
 
-    public DocsController(IElasticClient es, IDistributedCache cache,IBackgroundTaskQueue backgroundTaskQueue,
-        IServiceScopeFactory scopeFactory)
+    public DocsController(
+        IElasticClient es,
+        IDistributedCache cache,
+        IBackgroundTaskQueue backgroundTaskQueue,
+        IServiceScopeFactory scopeFactory,
+        ILogger<DocsController> logger)
     {
         _es = es;
         _cache = cache;
         _backgroundTaskQueue = backgroundTaskQueue;
         _scopeFactory = scopeFactory;
+        _logger = logger;
     }
 
-    // Clé stable et courte pour (q,size,from,includeOccurrences)
+    // Clés de cache
     private static string CacheKey(string q, int size, int from, bool includeOccurrences)
     {
         using var sha = SHA256.Create();
         var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes($"{q}|{size}|{from}|{includeOccurrences}"));
-        return "search:" + Convert.ToHexString(bytes); // ex: search:ABCDEF...
+        return "search:" + Convert.ToHexString(bytes);
+    }
+
+    private static string AnalyzeCacheKey(string q)
+    {
+        using var sha = SHA256.Create();
+        var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes($"analyze:{q}"));
+        return "analyze:" + Convert.ToHexString(bytes);
     }
 
     [HttpPost("init")]
     public async Task<IActionResult> InitAll(CancellationToken ct = default)
     {
-        // 1) Créer l’index s’il n’existe pas
         var exists = await _es.Indices.ExistsAsync(IndexName, i => i, ct);
         bool indexCreated = false;
 
@@ -97,18 +109,11 @@ public class DocsController : ControllerBase
             indexCreated = true;
         }
 
-        // 2) (Ré)créer / mettre à jour le pipeline d’ingest
         var pipelineBody = @"
         {
           ""description"": ""Extract text from PDF"",
           ""processors"": [
-            {
-              ""attachment"": {
-                ""field"": ""data"",
-                ""target_field"": ""attachment"",
-                ""indexed_chars"": -1
-              }
-            },
+            { ""attachment"": { ""field"": ""data"", ""target_field"": ""attachment"", ""indexed_chars"": -1 } },
             { ""remove"": { ""field"": ""data"", ""ignore_missing"": true } }
           ],
           ""on_failure"": [
@@ -156,27 +161,33 @@ public class DocsController : ControllerBase
             Document = new
             {
                 fileName = file.FileName,
-                data = base64,          // lu par le processor "attachment"
+                data = base64,
                 uploadedAt = DateTime.UtcNow
             },
             Refresh = Refresh.True
         };
 
         var resp = await _es.IndexAsync(indexReq, ct);
-        if (!resp.IsValid) return Problem($"Indexation échouée: {resp.ServerError?.Error?.Reason ?? resp.OriginalException?.Message}");
-//on fait une copie du fichier a la racine du projet 
-        var path = Path.Combine(Directory.GetCurrentDirectory(), file.FileName);
-        using (var stream = new FileStream(path, FileMode.Create))
+        if (!resp.IsValid)
+            return Problem($"Indexation échouée: {resp.ServerError?.Error?.Reason ?? resp.OriginalException?.Message}");
+
+        // Copie locale (facultatif)
+        try
+        {
+            var path = Path.Combine(Directory.GetCurrentDirectory(), file.FileName);
+            await using var stream = new FileStream(path, FileMode.Create);
             await file.CopyToAsync(stream, ct);
-        
-        // Invalidation fine non nécessaire : TTL court du cache suffit
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Échec de la copie locale du fichier {File}", file.FileName);
+        }
+
         return Ok(new { id, file = file.FileName });
     }
 
-    
-    
-
     [HttpGet("search")]
+    [OutputCache(PolicyName = "SearchCache")]
     public async Task<IActionResult> Search(
         [FromQuery] string q,
         [FromQuery] int size = 10,
@@ -184,99 +195,211 @@ public class DocsController : ControllerBase
         [FromQuery] bool includeOccurrences = true,
         CancellationToken ct = default)
     {
-        
-        _backgroundTaskQueue.QueueBackgroundWorkItem(async ct =>
+        // tâche asynchrone annexe (non bloquante)
+        _backgroundTaskQueue.QueueBackgroundWorkItem(async ct2 =>
         {
-            using var scope = _scopeFactory.CreateScope();
-            var firebase = scope.ServiceProvider.GetRequiredService<FireBaseEnr>();
-
-        
-            await firebase.ExecAsync(q, ct);
-          
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var firebase = scope.ServiceProvider.GetRequiredService<FireBaseEnr>();
+                await firebase.ExecAsync(q, ct2);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Background task FireBaseEnr.ExecAsync failed for query {Q}", q);
+            }
         });
+
         if (string.IsNullOrWhiteSpace(q)) return BadRequest("Paramètre 'q' requis.");
         size = size is > 0 and <= 100 ? size : 10;
         from = Math.Max(0, from);
 
         var sw = Stopwatch.StartNew();
 
-        // 0) Tentative cache
+        // 0) Tentative cache Redis (tolérance pannes)
         var cacheKey = CacheKey(q, size, from, includeOccurrences);
-        var cachedJson = await _cache.GetStringAsync(cacheKey, ct);
+        string? cachedJson = null;
+        try
+        {
+            cachedJson = await _cache.GetStringAsync(cacheKey, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Redis GET search cache failed for {Key}", cacheKey);
+            Response.Headers["X-Cache"] = "BYPASS";
+#if DEBUG
+            Response.Headers["X-Cache-Error"] = "get:" + ex.GetType().Name;
+#endif
+        }
+
         if (cachedJson is not null)
         {
             sw.Stop();
             Response.Headers["X-Cache"] = "HIT";
             Response.Headers["X-Duration-Ms"] = sw.ElapsedMilliseconds.ToString();
+            SetCacheHeaders();
             return Content(cachedJson, "application/json");
         }
 
-        // 1) Requête ES
+        // A) _analyze : cacheable 24h
+        string[] queryTokens = Array.Empty<string>();
+        if (includeOccurrences)
+        {
+            var analyzeKey = AnalyzeCacheKey(q);
+            try
+            {
+                var cachedAnalyze = await _cache.GetStringAsync(analyzeKey, ct);
+                if (cachedAnalyze is not null)
+                {
+                    queryTokens = JsonSerializer.Deserialize<string[]>(cachedAnalyze) ?? Array.Empty<string>();
+                    Response.Headers["X-Analyze-Cache"] = "HIT";
+                }
+                else
+                {
+                    Response.Headers["X-Analyze-Cache"] = "MISS";
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Redis GET analyze cache failed for {Key}", analyzeKey);
+                Response.Headers["X-Analyze-Cache"] = "BYPASS";
+#if DEBUG
+                Response.Headers["X-Cache-Error"] = "analyze-get:" + ex.GetType().Name;
+#endif
+            }
+
+            if (queryTokens.Length == 0)
+            {
+                var analyze = await _es.Indices.AnalyzeAsync(a => a
+                    .Index(IndexName)
+                    .Analyzer("fr_text")
+                    .Text(q), ct);
+
+                queryTokens = analyze.Tokens?
+                    .Select(t => t.Token)
+                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                    .Distinct(StringComparer.Ordinal)
+                    .Take(32)
+                    .ToArray() ?? Array.Empty<string>();
+
+                try
+                {
+                    await _cache.SetStringAsync(
+                        analyzeKey,
+                        JsonSerializer.Serialize(queryTokens),
+                        new DistributedCacheEntryOptions
+                        {
+                            AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
+                        }, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Redis SET analyze cache failed for {Key}", analyzeKey);
+                }
+            }
+        }
+
+        var queryTokenSet = new HashSet<string>(queryTokens, StringComparer.Ordinal);
+
+        // B) Requête ES optimisée (request cache + highlight raisonnable)
         var resp = await _es.SearchAsync<dynamic>(s => s
-            .Index(IndexName)
-            .From(from)
-            .Size(size)
-            .TrackTotalHits(true)
-            .Query(qry => qry
-                .Bool(b => b
-                    .Should(
-                        sh => sh.SimpleQueryString(sqs => sqs
-                            .Fields(f => f
-                                .Field("attachment.content")
-                                .Field("fileName")
-                            )
-                            .Query(q)
-                            .DefaultOperator(Operator.And)
-                            .AnalyzeWildcard(false)
-                        ),
-                        sh => sh.Match(m => m
-                            .Field("attachment.content")
-                            .Query(q)
-                            .Operator(Operator.And)
-                            .MinimumShouldMatch("100%")
-                        )
-                    )
-                    .MinimumShouldMatch(1)
-                )
-            )
-            .Highlight(h => h
-                .PreTags("<em>").PostTags("</em>")
-                .RequireFieldMatch(false)
-                .Fields(f => f
-                    .Field("attachment.content")
-                    .NumberOfFragments(20000)
-                    .FragmentSize(100)
-                )
-            ),
-            ct
-        );
+                .Index(IndexName)
+                .From(from)
+                .Size(size)
+                .TrackTotalHits(true)
+                .RequestCache(true)
+                .Source(sf => sf.Includes(i => i.Field("fileName")))
+                .Query(qry => qry.SimpleQueryString(sqs => sqs
+                    .Fields(f => f.Field("attachment.content").Field("fileName"))
+                    .Query(q)
+                    .DefaultOperator(Operator.And)
+                    .AnalyzeWildcard(false)))
+                .Highlight(h => h
+                    .PreTags("<em>").PostTags("</em>")
+                    .RequireFieldMatch(true)
+                    .Fields(hf => hf
+                        .Field("attachment.content")
+                        .NumberOfFragments(5)
+                        .FragmentSize(160)
+                        .NoMatchSize(160))),
+            ct);
 
         if (!resp.IsValid)
             return Problem($"Recherche échouée: {resp.ServerError?.Error?.Reason ?? resp.OriginalException?.Message}");
 
-        // 2) Analyse des tokens de la requête (si demandé)
-        string[] queryTokens = Array.Empty<string>();
-        if (includeOccurrences)
-        {
-            var analyze = await _es.Indices.AnalyzeAsync(a => a
-                .Index(IndexName)
-                .Analyzer("fr_text")
-                .Text(q),
-                ct
-            );
-
-            queryTokens = analyze.Tokens?
-                .Select(t => t.Token)
-                .Where(t => !string.IsNullOrWhiteSpace(t))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray() ?? Array.Empty<string>();
-        }
-        var queryTokenSet = new HashSet<string>(queryTokens, StringComparer.Ordinal);
-
-        // 3) Enrichissement (occurrences + snippets)
         var enriched = new List<object>(resp.Hits.Count);
+        var hitList = resp.Hits.ToList();
 
-        foreach (var h in resp.Hits)
+        // C) MultiTermVectors en batch (si occurrences demandées)
+        Dictionary<string, (int total, Dictionary<string, int> perTerm, List<object> occ)>? tvById = null;
+
+        if (includeOccurrences && queryTokens.Length > 0 && hitList.Count > 0)
+        {
+            var ops = hitList.Select(h =>
+                (IMultiTermVectorOperation)new MultiTermVectorOperation<object>(h.Id)
+                {
+                    Fields = (Fields)(Field)"attachment.content",
+                    Offsets = true,
+                    Positions = true,
+                    Payloads = false,
+                    TermStatistics = false,
+                    FieldStatistics = false
+                }).ToArray();
+
+            var req = new MultiTermVectorsRequest(IndexName) { Documents = ops };
+
+            var mtv = await _es.MultiTermVectorsAsync(req, ct);
+
+            tvById = new Dictionary<string, (int, Dictionary<string, int>, List<object>)>(StringComparer.Ordinal);
+            if (mtv.IsValid && mtv.Documents != null)
+            {
+                foreach (var d in mtv.Documents)
+                {
+                    var id = d.Id;
+                    int totalOccurrences = 0;
+                    var countsByTerm = new Dictionary<string, int>(StringComparer.Ordinal);
+                    var occurrences = new List<object>();
+
+                    if (d.Found &&
+                        d.TermVectors != null &&
+                        d.TermVectors.TryGetValue("attachment.content", out var fieldTv) &&
+                        fieldTv.Terms != null)
+                    {
+                        foreach (var kv in fieldTv.Terms)
+                        {
+                            var term = kv.Key;
+                            if (!queryTokenSet.Contains(term)) continue;
+
+                            var info = kv.Value;
+                            var tf = info.TermFrequency;
+                            if (tf > 0)
+                            {
+                                countsByTerm[term] = tf;
+                                totalOccurrences += tf;
+                            }
+
+                            if (info.Tokens != null)
+                            {
+                                foreach (var tok in info.Tokens)
+                                {
+                                    occurrences.Add(new
+                                    {
+                                        term,
+                                        position = tok.Position,
+                                        start = tok.StartOffset,
+                                        end = tok.EndOffset
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    tvById[id] = (totalOccurrences, countsByTerm, occurrences);
+                }
+            }
+        }
+
+        foreach (var h in hitList)
         {
             string fileName = string.Empty;
             if (h.Source is IDictionary<string, object> dict &&
@@ -297,52 +420,12 @@ public class DocsController : ControllerBase
             Dictionary<string, int>? countsByTerm = null;
             List<object>? occurrences = null;
 
-            if (includeOccurrences && queryTokens.Length > 0)
+            if (includeOccurrences && queryTokens.Length > 0 &&
+                tvById is not null && tvById.TryGetValue(h.Id, out var t))
             {
-                var tv = await _es.TermVectorsAsync<object>(t => t
-                    .Index(IndexName)
-                    .Id(h.Id)
-                    .Fields("attachment.content")
-                    .Offsets(true)
-                    .Positions(true)
-                    .Payloads(false)
-                    .TermStatistics(false)
-                    .FieldStatistics(false),
-                    ct
-                );
-
-                countsByTerm = new Dictionary<string, int>(StringComparer.Ordinal);
-                occurrences = new List<object>();
-
-                if (tv?.TermVectors != null &&
-                    tv.TermVectors.TryGetValue("attachment.content", out var tvField) &&
-                    tvField.Terms != null)
-                {
-                    foreach (var kv in tvField.Terms)
-                    {
-                        string term = kv.Key;
-
-                        if (!queryTokenSet.Contains(term)) continue;
-
-                        var info = kv.Value;
-                        countsByTerm[term] = info.TermFrequency;
-                        totalOccurrences += info.TermFrequency;
-
-                        if (info.Tokens != null)
-                        {
-                            foreach (var tok in info.Tokens)
-                            {
-                                occurrences.Add(new
-                                {
-                                    term,
-                                    position = tok.Position,
-                                    start = tok.StartOffset,
-                                    end = tok.EndOffset
-                                });
-                            }
-                        }
-                    }
-                }
+                totalOccurrences = t.total;
+                countsByTerm = t.perTerm;
+                occurrences = t.occ;
             }
 
             enriched.Add(new
@@ -369,22 +452,44 @@ public class DocsController : ControllerBase
 
         var json = JsonSerializer.Serialize(payload);
 
-        // 4) Mise en cache
-        await _cache.SetStringAsync(
-            cacheKey,
-            json,
-            new DistributedCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
-            },
-            ct);
+        // 4) Mise en cache Redis (tolérance pannes)
+        try
+        {
+            await _cache.SetStringAsync(
+                cacheKey,
+                json,
+                new DistributedCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
+                }, ct);
+            Response.Headers["X-Cache-Store"] = "OK";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Redis SET search cache failed for {Key}", cacheKey);
+            Response.Headers["X-Cache-Store"] = "SKIPPED";
+#if DEBUG
+            Response.Headers["X-Cache-Error"] = "set:" + ex.GetType().Name;
+#endif
+        }
 
         sw.Stop();
-        Response.Headers["X-Cache"] = "MISS";
+
+        if (!Response.Headers.ContainsKey("X-Cache"))
+            Response.Headers["X-Cache"] = "MISS";
+
         Response.Headers["X-Duration-Ms"] = sw.ElapsedMilliseconds.ToString();
-       
-     
+
+        SetCacheHeaders(); // pour CDN/proxy
 
         return Content(json, "application/json");
+    }
+
+    private void SetCacheHeaders()
+    {
+        // Autorise le cache partagé (CDN/proxy) + SWR
+        Response.Headers["Cache-Control"] = "public, max-age=120, s-maxage=300, stale-while-revalidate=30";
+        Response.Headers["Vary"] = "Accept-Encoding";
+        // Pas de Set-Cookie ici, sinon les proxies refuseront le cache partagé
     }
 }
