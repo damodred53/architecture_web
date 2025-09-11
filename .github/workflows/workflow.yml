@@ -3,18 +3,6 @@ name: workflow
 on:
   push:
     branches: [ main, Ajout-ci-cd ]
-    paths:
-      - 'ApiElasticSearch/**'
-      - 'Test unitaires/**'
-      - 'ApiElasticSearch.sln'
-      - '.github/workflows/**'
-  pull_request:
-    branches: [ main, Ajout-ci-cd ]
-    paths:
-      - 'ApiElasticSearch/**'
-      - 'Test unitaires/**'
-      - 'ApiElasticSearch.sln'
-      - '.github/workflows/**'
 
 permissions:
   contents: write   # Créer la Release 
