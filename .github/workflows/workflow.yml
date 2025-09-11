@@ -49,7 +49,7 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Run tests with coverage
         run: |
-          dotnet test "Test unitaires/Test unitaires.csproj" -c ${{ env.CONFIGURATION }} --no-build \
+          dotnet test "TestUnitaires/TestUnitaires.csproj" -c ${{ env.CONFIGURATION }} --no-build \
             /p:CollectCoverage=true \
             /p:CoverletOutput=./TestResults/coverage/ \
             /p:CoverletOutputFormat=lcov
