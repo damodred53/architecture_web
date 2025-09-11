@@ -1,0 +1,132 @@
+name: workflow
+
+on:
+  push:
+    branches: [ main, Ajout-ci-cd ]
+    paths:
+      - 'ApiElasticSearch/**'
+      - 'Test unitaires/**'
+      - 'ApiElasticSearch.sln'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main, Ajout-ci-cd ]
+    paths:
+      - 'ApiElasticSearch/**'
+      - 'Test unitaires/**'
+      - 'ApiElasticSearch.sln'
+      - '.github/workflows/**'
+
+permissions:
+  contents: write   # Créer la Release
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  CONFIGURATION: Release
+
+jobs:
+  restore_build:
+    name: Restore & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+      - name: Restore
+        run: dotnet restore ApiElasticSearch.sln
+      - name: Build
+        run: dotnet build ApiElasticSearch.sln -c ${{ env.CONFIGURATION }} --no-restore
+
+  test:
+    name: Unit tests (coverage)
+    runs-on: ubuntu-latest
+    needs: restore_build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+      - name: Run tests with coverage
+        run: |
+          dotnet test "Test unitaires/Test unitaires.csproj" -c ${{ env.CONFIGURATION }} --no-build \
+            /p:CollectCoverage=true \
+            /p:CoverletOutput=./TestResults/coverage/ \
+            /p:CoverletOutputFormat=lcov
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: '**/TestResults/coverage/*'
+          if-no-files-found: ignore
+
+  audit:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    needs: restore_build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.Dotnet_VERSION || env.DOTNET_VERSION }}
+          cache: true
+      - name: List vulnerable packages
+        run: |
+          dotnet list ApiElasticSearch.sln package --vulnerable || true
+          # échoue si "critical" trouvé
+          dotnet list ApiElasticSearch.sln package --vulnerable | grep -qi "critical" && exit 1 || echo "No critical vulns"
+
+  publish_api:
+    name: Publish API (zip)
+    runs-on: ubuntu-latest
+    needs: [test, audit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+      - name: Publish (framework-dependent)
+        run: dotnet publish ApiElasticSearch/ApiElasticSearch.csproj -c ${{ env.CONFIGURATION }} -o publish
+      - name: Pack artifact
+        run: |
+          mkdir -p artifacts
+          (cd publish && zip -r ../artifacts/ApiElasticSearch-${{ github.sha }}.zip .)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-publish
+          path: artifacts/*.zip
+          if-no-files-found: error
+
+  release_latest:
+    name: Release "latest"
+    runs-on: ubuntu-latest
+    needs: publish_api
+    if: github.event_name == 'push'   # pas sur PR
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: api-publish
+          path: .
+      - name: Reset 'latest' release & tag
+        run: |
+          gh release delete latest -y || true
+          git tag -d latest || true
+          git push origin :refs/tags/latest || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create new 'latest' release with artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Backend Build"
+          body: "Build automatique depuis ${{ github.ref }} @ ${{ github.sha }}"
+          files: "*.zip"
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
