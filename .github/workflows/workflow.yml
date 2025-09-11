@@ -17,7 +17,7 @@ on:
       - '.github/workflows/**'
 
 permissions:
-  contents: write   # Créer la Release
+  contents: write   # Créer la Release 
 
 env:
   DOTNET_VERSION: '8.0.x'
