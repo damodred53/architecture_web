@@ -60,7 +60,7 @@ namespace ApiElasticSearch.Controller
          
             var output = AddHighlightsAndOpen(inputPath, hits, zoom);
 
-            Response.Headers["Content-Disposition"] = $"inline; filename=\"{Path.GetFileName(fichier)}\"";
+            Response.Headers["Content-Disposition"] = $"inline; filename=\"{Path.GetFileName(fichier.Replace("é", "e"))}\"";
             return File(output, "application/pdf");
         }
 
