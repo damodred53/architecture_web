@@ -164,10 +164,17 @@ public class DocsController : ControllerBase
 
         var resp = await _es.IndexAsync(indexReq, ct);
         if (!resp.IsValid) return Problem($"Indexation échouée: {resp.ServerError?.Error?.Reason ?? resp.OriginalException?.Message}");
-
+//on fait une copie du fichier a la racine du projet 
+        var path = Path.Combine(Directory.GetCurrentDirectory(), file.FileName);
+        using (var stream = new FileStream(path, FileMode.Create))
+            await file.CopyToAsync(stream, ct);
+        
         // Invalidation fine non nécessaire : TTL court du cache suffit
         return Ok(new { id, file = file.FileName });
     }
+
+    
+    
 
     [HttpGet("search")]
     public async Task<IActionResult> Search(

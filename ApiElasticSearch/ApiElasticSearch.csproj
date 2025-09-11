@@ -8,9 +8,13 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
         <PackageReference Include="Elastic.Clients.Elasticsearch" Version="9.1.6" />
         <PackageReference Include="Elasticsearch.Net" Version="7.17.5" />
         <PackageReference Include="Google.Cloud.Firestore" Version="3.10.0" />
+        <PackageReference Include="itext7" Version="9.3.0" />
+        <PackageReference Include="itext7.bouncy-castle-adapter" Version="9.3.0" />
+        <PackageReference Include="iTextSharp" Version="5.5.13.4" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.8" />
         <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="8.0.19" />
         <PackageReference Include="NEST" Version="7.17.5" />
@@ -28,8 +32,13 @@
     </ItemGroup>
 
     <ItemGroup>
-      <Folder Include="pdf\" />
       <Folder Include="wwwroot\uploads\" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Update="1-2008.4.pdf">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
     </ItemGroup>
 
 </Project>
