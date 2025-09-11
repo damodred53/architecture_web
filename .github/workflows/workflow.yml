@@ -33,7 +33,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-          cache: true
       - name: Restore
         run: dotnet restore ApiElasticSearch.sln
       - name: Build
@@ -48,7 +47,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-          cache: true
       - name: Run tests with coverage
         run: |
           dotnet test "Test unitaires/Test unitaires.csproj" -c ${{ env.CONFIGURATION }} --no-build \
@@ -72,7 +70,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-          cache: true
       - name: List vulnerable packages
         run: |
           dotnet list ApiElasticSearch.sln package --vulnerable || true
@@ -88,7 +85,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-          cache: true
       - name: Publish (framework-dependent)
         run: dotnet publish ApiElasticSearch/ApiElasticSearch.csproj -c ${{ env.CONFIGURATION }} -o publish
       - name: Pack artifact
