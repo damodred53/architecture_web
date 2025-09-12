@@ -2,12 +2,17 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using ApiElasticSearch.Objet;
 using ApiElasticSearch.Service;
 using ApiElasticSearch.Worker;
 using Elasticsearch.Net;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Distributed;
 using Nest;
+using System.Text.RegularExpressions;
+using ApiElasticSearch.Module;
+using UglyToad.PdfPig.Util;
+using PigPdfDocument = UglyToad.PdfPig.PdfDocument;
 
 namespace ApiElasticSearch.Controller;
 
@@ -387,4 +392,194 @@ public class DocsController : ControllerBase
 
         return Content(json, "application/json");
     }
+    [HttpGet("search/fast")]
+    public async Task<IActionResult> SearchFast(
+        [FromQuery] string q,
+        [FromQuery] int size = 10,
+        [FromQuery] int from = 0,
+        [FromQuery] bool includeOccurrences = true,
+        CancellationToken ct = default)
+    {
+        
+        _backgroundTaskQueue.QueueBackgroundWorkItem(async ct =>
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var firebase = scope.ServiceProvider.GetRequiredService<FireBaseEnr>();
+
+        
+            await firebase.ExecAsync(q, ct);
+          
+        });
+        if (string.IsNullOrWhiteSpace(q)) return BadRequest("Paramètre 'q' requis.");
+        size = size is > 0 and <= 100 ? size : 10;
+        from = Math.Max(0, from);
+
+        var sw = Stopwatch.StartNew();
+
+      
+
+        // 1) Requête ES
+        var resp = await _es.SearchAsync<dynamic>(s => s
+            .Index(IndexName)
+            .From(from)
+            .Size(size)
+            .TrackTotalHits(true)
+            .Query(qry => qry
+                .Bool(b => b
+                    .Should(
+                        sh => sh.SimpleQueryString(sqs => sqs
+                            .Fields(f => f
+                                .Field("attachment.content")
+                                .Field("fileName")
+                            )
+                            .Query(q)
+                            .DefaultOperator(Operator.And)
+                            .AnalyzeWildcard(false)
+                        ),
+                        sh => sh.Match(m => m
+                            .Field("attachment.content")
+                            .Query(q)
+                            .Operator(Operator.And)
+                            .MinimumShouldMatch("100%")
+                        )
+                    )
+                    .MinimumShouldMatch(1)
+                )
+            )
+            .Highlight(h => h
+                .PreTags("<em>").PostTags("</em>")
+                .RequireFieldMatch(false)
+                .Fields(f => f
+                    .Field("attachment.content")
+                    .NumberOfFragments(20000)
+                    .FragmentSize(100)
+                )
+            ),
+            ct
+        );
+
+        if (!resp.IsValid)
+            return Problem($"Recherche échouée: {resp.ServerError?.Error?.Reason ?? resp.OriginalException?.Message}");
+
+        // 2) Analyse des tokens de la requête (si demandé)
+        string[] queryTokens = Array.Empty<string>();
+        if (includeOccurrences)
+        {
+            var analyze = await _es.Indices.AnalyzeAsync(a => a
+                .Index(IndexName)
+                .Analyzer("fr_text")
+                .Text(q),
+                ct
+            );
+
+            queryTokens = analyze.Tokens?
+                .Select(t => t.Token)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray() ?? Array.Empty<string>();
+        }
+        var queryTokenSet = new HashSet<string>(queryTokens, StringComparer.Ordinal);
+
+        var listSnipet = new List<ObjRechRap>();
+     
+
+        foreach (var h in resp.Hits)
+        {
+            string fileName = string.Empty;
+            if (h.Source is IDictionary<string, object> dict &&
+                dict.TryGetValue("fileName", out var v) && v is not null)
+            {
+                fileName = v.ToString()!;
+            }
+            List<MotObj> listMot = new List<MotObj>();
+            var snippets = Array.Empty<string>();
+            if (h.Highlight != null &&
+                h.Highlight.TryGetValue("attachment.content", out var hs) &&
+                hs != null)
+            {
+                snippets = hs.ToArray();
+
+                foreach (var s in snippets)
+                {
+                    var pattern = @"<em>(.*?)</em>";
+                    var matches = System.Text.RegularExpressions.Regex.Matches(s, pattern);
+                    foreach (System.Text.RegularExpressions.Match match in matches)
+                    {
+                        listMot.Add(new MotObj 
+                        { 
+                            Mot = match.Groups[1].Value, 
+                            Extrait = s 
+                           
+                        });
+                    }
+                }
+            }
+            listSnipet.Add(new ObjRechRap()
+            {
+                documents = fileName,
+                Mot = listMot
+            });
+
+        }
+
+        return Ok(listSnipet);
+    }
+    
+    [HttpGet("findWordInPdf/{mot}/{index:int}/{fichier}/{*snippet}")]
+    public async Task<IActionResult> FindWordInPdf( string mot, int index, string fichier,string snippet)
+    {
+        try
+        {
+           
+            var inputPath = Path.Combine(Path.GetDirectoryName(AppDomain.CurrentDomain.BaseDirectory) ?? throw new InvalidOperationException(), fichier);
+            if (!System.IO.File.Exists(inputPath))
+                return NotFound($"Fichier introuvable : {fichier}");
+            List<IndexMot> pagesContenantLeMot = new List<IndexMot>();
+            var pdf = new Pdf();
+            var listeMot = pdf.ListeMot(snippet);
+
+            using (var doc = PigPdfDocument.Open(inputPath))
+            {
+                foreach (var page in doc.GetPages())
+                {
+                    var MotIndex = 0;
+                    var pgWords = DefaultWordExtractor.Instance.GetWords(page.Letters);
+                    foreach (var w in pgWords)
+                    {
+                        MotIndex++;
+                       var researchWord = listeMot.First(x => x.Item2 ==false).Item1;
+                        if (researchWord == w.Text)
+                        {
+                            var indexMot = listeMot.FindIndex(x => x.Item2 == false && x.Item1 == w.Text);
+                            // Tu recrées un nouveau tuple, en gardant le mot, et en mettant true
+                            listeMot[indexMot] = (listeMot[indexMot].Item1, true);
+                        }
+                        else
+                        {
+                            listeMot = listeMot.Select(x => (x.Item1, false)).ToList();
+                        }
+
+                        if (listeMot.All(x => x.Item2 == true))
+                        {
+                            pagesContenantLeMot.Add(new IndexMot()
+                            {
+                                indexMot = MotIndex,
+                                page = page.Number
+                            });
+                            listeMot = listeMot.Select(x => (x.Item1, false)).ToList();
+                        }
+                    }
+                }
+            }
+            var SurPdf = PdfHighlighter.HighlightSpan(inputPath,pagesContenantLeMot.First().page,pagesContenantLeMot.First().indexMot,listeMot.Count);
+
+            var fileName = Path.GetFileNameWithoutExtension(fichier) + "_highlight.pdf";
+            return File(SurPdf,"application/pdf", fileName);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, $"Erreur lors du traitement de la requête: {ex.Message}");
+        }
+    }
+    
 }
