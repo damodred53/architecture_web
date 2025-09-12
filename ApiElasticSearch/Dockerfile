@@ -27,4 +27,7 @@ RUN dotnet publish "ApiElasticSearch.csproj" -c $BUILD_CONFIGURATION -o /app/pub
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish ./
+
+COPY .ledico-d498c-firebase-adminsdk-fbsvc-eef0abcf49.json ./
+
 ENTRYPOINT ["dotnet", "ApiElasticSearch.dll"]
