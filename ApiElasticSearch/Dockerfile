@@ -1,46 +1,29 @@
-﻿# -------- RUNTIME (base) --------
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
+﻿FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 WORKDIR /app
-
-# Var d'env: écoute sur 8080
-ENV ASPNETCORE_URLS=http://+:8080 \
-    DOTNET_EnableDiagnostics=0 \
-    DOTNET_gcServer=1 \
-    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
-
-# Crée un user non-root (UID configurable)
-ARG APP_UID=10001
-RUN useradd --uid ${APP_UID} --create-home --shell /sbin/nologin appuser \
-    && chown -R appuser:appuser /app
-USER appuser
-
+ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
 
-# -------- BUILD (sdk) --------
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
 
-# Copie fine pour profiter du cache
-# (ajoute ici *.sln et éventuellement Directory.Packages.props si tu l’utilises)
-COPY ApiElasticSearch/ApiElasticSearch.csproj ApiElasticSearch/
-RUN dotnet restore "ApiElasticSearch/ApiElasticSearch.csproj"
+COPY ApiElasticSearch.csproj ./
+RUN dotnet restore "ApiElasticSearch.csproj"
 
-# Copie du reste du code
 COPY . .
-WORKDIR /src/ApiElasticSearch
+RUN dotnet restore
+
+# Build (facultatif si publish direct)
 RUN dotnet build "ApiElasticSearch.csproj" -c $BUILD_CONFIGURATION -o /app/build --no-restore
 
-# -------- PUBLISH --------
 FROM build AS publish
 ARG BUILD_CONFIGURATION=Release
-WORKDIR /src/ApiElasticSearch
+WORKDIR /src
+# R2R enlevé pour éviter les soucis de RID sur Apple Silicon; tu peux le remettre plus tard
 RUN dotnet publish "ApiElasticSearch.csproj" -c $BUILD_CONFIGURATION -o /app/publish \
-    --no-build \
-    /p:UseAppHost=false \
-    /p:PublishReadyToRun=true
+    --no-restore \
+    /p:UseAppHost=false
 
-# -------- FINAL --------
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish ./
