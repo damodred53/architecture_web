@@ -12,7 +12,7 @@ public class FireBaseRechercheController : ControllerBase
     [HttpGet("recherche/{mot}")]
     public async Task<IActionResult> Get(string mot, CancellationToken ct)
     {
-        var path = "ledico-d498c-firebase-adminsdk-fbsvc-eef0abcf49.json";
+        var path = "ledico-d498c-firebase-adminsdk-fbsvc-f3f266b947.json";
 
         var credential = GoogleCredential.FromFile(path)
             .CreateScoped("https://www.googleapis.com/auth/datastore");
