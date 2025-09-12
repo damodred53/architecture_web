@@ -11,9 +11,14 @@ builder.Services.AddSingleton<IBackgroundTaskQueue, BackgroundTaskQueue>();
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddScoped<FireBaseEnr>();
 
-builder.Services.AddCors(o =>
+builder.Services.AddCors(options =>
 {
-    o.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyOrigin()
+            .AllowAnyMethod()
+            .AllowAnyHeader();
+    });
 });
 
 // Redis (env: Redis__Configuration, fallback dev)
