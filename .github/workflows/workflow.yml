@@ -75,16 +75,24 @@ jobs:
     needs: publish_api
     steps:
       - uses: actions/checkout@v4
+
       - name: Create Firebase credentials file
         run: |
           cat > ApiElasticSearch/.ledico-d498c-firebase-adminsdk-fbsvc-eef0abcf49.json << 'EOF'
           ${{ secrets.FIREBASE_JSON }}
           EOF
+
+      - name: Sanity check – creds file is here
+        run: |
+          ls -l ApiElasticSearch | sed -n '1,120p'
+          test -s "ApiElasticSearch/.ledico-d498c-firebase-adminsdk-fbsvc-eef0abcf49.json" || (echo "Missing creds file" && exit 1)
+
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build & Push
         uses: docker/build-push-action@v6
         with:

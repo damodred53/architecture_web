@@ -29,5 +29,6 @@ WORKDIR /app
 COPY --from=publish /app/publish ./
 
 COPY .ledico-d498c-firebase-adminsdk-fbsvc-eef0abcf49.json ./
+ENV GOOGLE_APPLICATION_CREDENTIALS=/app/.ledico-d498c-firebase-adminsdk-fbsvc-eef0abcf49.json
 
 ENTRYPOINT ["dotnet", "ApiElasticSearch.dll"]
