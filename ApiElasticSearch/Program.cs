@@ -4,8 +4,6 @@ using Nest;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddControllers();
@@ -13,39 +11,33 @@ builder.Services.AddSingleton<IBackgroundTaskQueue, BackgroundTaskQueue>();
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddScoped<FireBaseEnr>();
 
-
-builder.Services.AddCors(options =>
+builder.Services.AddCors(o =>
 {
-    options.AddDefaultPolicy(policy =>
-    {
-        policy.AllowAnyOrigin()
-            .AllowAnyMethod()
-            .AllowAnyHeader();
-    });
+    o.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
 });
 
-var redisConn = builder.Configuration.GetValue<string>("Redis:Configuration");
-
-builder.Services.AddStackExchangeRedisCache(options =>
+// Redis (env: Redis__Configuration, fallback dev)
+var redisConn = builder.Configuration.GetValue<string>("Redis:Configuration") ?? "localhost:6379";
+builder.Services.AddStackExchangeRedisCache(opt =>
 {
-    options.Configuration = redisConn;
-    options.InstanceName = "docsapi:"; // préfixe des clés
+    opt.Configuration = redisConn;
+    opt.InstanceName = "docsapi:";
 });
 
-var esSettings = new ConnectionSettings(new Uri("http://localhost:9200"))
+// Elasticsearch (env: Elastic__Uri, fallback dev)
+var esUri = builder.Configuration.GetValue<string>("Elastic:Uri") ?? "http://localhost:9200";
+var esSettings = new ConnectionSettings(new Uri(esUri))
     .DefaultIndex("documents");
 builder.Services.AddSingleton<IElasticClient>(new ElasticClient(esSettings));
 
-
 var app = builder.Build();
-
-
-// Configure the HTTP request pipeline.
 
 app.UseSwagger();
 app.UseSwaggerUI();
 
-app.UseHttpsRedirection();
+// En conteneur, tu peux souvent laisser tomber la redirection HTTPS
+// app.UseHttpsRedirection();
+
 app.UseCors();
 app.MapControllers();
 
